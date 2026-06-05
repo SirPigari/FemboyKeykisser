@@ -13,9 +13,9 @@ main.exe: source/main.c build/dev.o build/input.o build/bot.o
 	$(CC) -o main.exe source/main.c build/dev.o build/input.o build/bot.o -lwinhttp -mwindows -O3
 
 main: main.exe
-all: main
+all: main.exe
 
-.PHONY: clean run rel main
+.PHONY: clean run rel main all
 
 clean:
 	del /Q main.exe build/dev.o build/input.o build/bot.o

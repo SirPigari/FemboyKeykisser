@@ -53,6 +53,7 @@ static void on_packet(InputPacket* p, void* userdata) {
         input_free_packet(p);
         return;
     }
+    process_uploads();
     process_commands();
     if (is_disabled()) {
         printf("Packet received but processing is disabled. Ignoring.\n");
@@ -161,6 +162,7 @@ int main(void) {
     }
 
     init_bot();
+    process_uploads();
     process_commands();
 
     if (input_init(on_packet, NULL, 0) != 0) {

